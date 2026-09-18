@@ -1609,13 +1609,13 @@ export const db = {
           });
           return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
         } catch (err: unknown) {
+          console.error("[CRITICAL DB ERROR: Appointment creation failed on Prisma]", err);
           // Check for unique constraint violation (double booking)
           const msg = err instanceof Error ? err.message : "";
           if (msg.includes("Unique constraint") || msg.includes("unique")) {
             throw new Error("SLOT_TAKEN");
           }
           markPrismaUnavailable();
-          console.warn("[Prisma Appointment Create fallback to local store]", err);
         }
       }
       const store = initLocalStore();
