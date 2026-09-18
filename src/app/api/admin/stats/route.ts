@@ -11,16 +11,25 @@ export async function GET(request: NextRequest) {
   const { searchParams } = new URL(request.url);
   const days = parseInt(searchParams.get("days") || "30", 10);
 
-  const leads = await db.leads.findMany();
+  const [leads, appointments] = await Promise.all([
+    db.leads.findMany(),
+    db.appointments.findMany(),
+  ]);
+
+  const upcomingAppointments = appointments.filter(
+    (a) => a.status === "CONFIRMED"
+  );
 
   const counts = {
     total: leads.length,
     new: leads.filter((l) => l.status === "NEW").length,
     contacted: leads.filter((l) => l.status === "CONTACTED").length,
-    meetingScheduled: leads.filter((l) => l.status === "MEETING_SCHEDULED").length,
+    meetingScheduled: appointments.length, // Real count of booked appointments
     proposalSent: leads.filter((l) => l.status === "PROPOSAL_SENT").length,
     won: leads.filter((l) => l.status === "WON").length,
     lost: leads.filter((l) => l.status === "LOST").length,
+    appointmentsTotal: appointments.length,
+    appointmentsUpcoming: upcomingAppointments.length,
   };
 
   // Group by service
@@ -77,5 +86,6 @@ export async function GET(request: NextRequest) {
     byStatus,
     timeSeries,
     recentLeads: leads.slice(0, 8),
+    recentAppointments: appointments.slice(0, 6),
   });
 }

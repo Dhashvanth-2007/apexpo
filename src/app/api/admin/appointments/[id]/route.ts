@@ -76,3 +76,18 @@ export async function PATCH(request: NextRequest, { params }: { params: { id: st
     return NextResponse.json({ error: "Failed to update appointment" }, { status: 500 });
   }
 }
+
+export async function DELETE(request: NextRequest, { params }: { params: { id: string } }) {
+  const auth = await requireAdmin();
+  if (!auth.success) {
+    return NextResponse.json({ error: auth.error }, { status: auth.status });
+  }
+
+  const success = await db.appointments.delete(params.id);
+  if (!success) {
+    return NextResponse.json({ error: "Appointment not found or could not be deleted" }, { status: 404 });
+  }
+
+  console.log(`[Admin] Appointment ${params.id} deleted by ${auth.admin.name}`);
+  return NextResponse.json({ success: true, message: "Appointment deleted successfully" });
+}

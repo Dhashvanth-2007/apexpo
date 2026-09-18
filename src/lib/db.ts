@@ -1555,32 +1555,38 @@ export const db = {
     },
 
     async checkSlotAvailability(date: string, time: string, excludeId?: string): Promise<boolean> {
-      try {
-        const where: Record<string, unknown> = { appointmentDate: date, appointmentTime: time };
-        if (excludeId) where.NOT = { id: excludeId };
-        const existing = await prisma.appointment.findFirst({ where });
-        return !existing;
-      } catch {
-        const store = initLocalStore();
-        return !store.appointments.find(
-          (a) => a.appointmentDate === date && a.appointmentTime === time && (!excludeId || a.id !== excludeId)
-        );
+      if (isPrismaAvailable()) {
+        try {
+          const where: Record<string, unknown> = { appointmentDate: date, appointmentTime: time, status: { not: "CANCELLED" } };
+          if (excludeId) where.NOT = { id: excludeId };
+          const existing = await prisma.appointment.findFirst({ where });
+          return !existing;
+        } catch (dbErr) {
+          markPrismaUnavailable();
+        }
       }
+      const store = initLocalStore();
+      return !store.appointments.find(
+        (a) => a.appointmentDate === date && a.appointmentTime === time && a.status !== "CANCELLED" && (!excludeId || a.id !== excludeId)
+      );
     },
 
     async getOccupiedSlots(date: string): Promise<string[]> {
-      try {
-        const results = await prisma.appointment.findMany({
-          where: { appointmentDate: date, status: { not: "CANCELLED" } },
-          select: { appointmentTime: true },
-        });
-        return results.map((r) => r.appointmentTime);
-      } catch {
-        const store = initLocalStore();
-        return store.appointments
-          .filter((a) => a.appointmentDate === date && a.status !== "CANCELLED")
-          .map((a) => a.appointmentTime);
+      if (isPrismaAvailable()) {
+        try {
+          const results = await prisma.appointment.findMany({
+            where: { appointmentDate: date, status: { not: "CANCELLED" } },
+            select: { appointmentTime: true },
+          });
+          return results.map((r) => r.appointmentTime);
+        } catch (dbErr) {
+          markPrismaUnavailable();
+        }
       }
+      const store = initLocalStore();
+      return store.appointments
+        .filter((a) => a.appointmentDate === date && a.status !== "CANCELLED")
+        .map((a) => a.appointmentTime);
     },
 
     async create(data: Omit<AppointmentRecord, "id" | "createdAt" | "updatedAt">): Promise<AppointmentRecord> {
@@ -1608,24 +1614,25 @@ export const db = {
           if (msg.includes("Unique constraint") || msg.includes("unique")) {
             throw new Error("SLOT_TAKEN");
           }
+          markPrismaUnavailable();
           console.warn("[Prisma Appointment Create fallback to local store]", err);
         }
       }
       const store = initLocalStore();
-        const conflict = store.appointments.find(
-          (a) => a.appointmentDate === data.appointmentDate && a.appointmentTime === data.appointmentTime && a.status !== "CANCELLED"
-        );
-        if (conflict) throw new Error("SLOT_TAKEN");
-        const record: AppointmentRecord = {
-          id: `appt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
-          ...data,
-          status: "CONFIRMED",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        };
-        store.appointments.unshift(record);
-        saveLocalStore(store);
-        return record;
+      const conflict = store.appointments.find(
+        (a) => a.appointmentDate === data.appointmentDate && a.appointmentTime === data.appointmentTime && a.status !== "CANCELLED"
+      );
+      if (conflict) throw new Error("SLOT_TAKEN");
+      const record: AppointmentRecord = {
+        id: `appt_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        ...data,
+        status: "CONFIRMED",
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      store.appointments.unshift(record);
+      saveLocalStore(store);
+      return record;
     },
 
     async findMany(options?: {
@@ -1634,109 +1641,139 @@ export const db = {
       filter?: "today" | "upcoming" | "completed" | "cancelled" | "noshow" | "all";
       clientId?: string;
     }): Promise<(AppointmentRecord & { clientName: string; clientEmail: string; clientCompany: string; clientPhone: string })[]> {
-      const today = new Date().toISOString().slice(0, 10);
-      try {
-        const where: Record<string, unknown> = {};
-        if (options?.clientId) where.clientId = options.clientId;
-        if (options?.status && options.status !== "ALL") where.status = options.status;
-        if (options?.date) where.appointmentDate = options.date;
-        if (options?.filter === "today") where.appointmentDate = today;
-        if (options?.filter === "upcoming") where.AND = [{ appointmentDate: { gte: today } }, { status: "CONFIRMED" }];
-        if (options?.filter === "completed") where.status = "COMPLETED";
-        if (options?.filter === "cancelled") where.status = "CANCELLED";
-        if (options?.filter === "noshow") where.status = "NO_SHOW";
+      const today = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Kolkata" }).format(new Date());
+      if (isPrismaAvailable()) {
+        try {
+          const where: Record<string, unknown> = {};
+          if (options?.clientId) where.clientId = options.clientId;
+          if (options?.status && options.status !== "ALL") where.status = options.status;
+          if (options?.date) where.appointmentDate = options.date;
+          if (options?.filter === "today") where.appointmentDate = today;
+          if (options?.filter === "upcoming") where.AND = [{ appointmentDate: { gte: today } }, { status: "CONFIRMED" }];
+          if (options?.filter === "completed") where.status = "COMPLETED";
+          if (options?.filter === "cancelled") where.status = "CANCELLED";
+          if (options?.filter === "noshow") where.status = "NO_SHOW";
 
-        const results = await prisma.appointment.findMany({
-          where,
-          orderBy: [{ appointmentDate: "desc" }, { appointmentTime: "desc" }],
-          include: { client: true },
-        });
-        return results.map((r) => ({
-          ...r,
-          createdAt: r.createdAt.toISOString(),
-          updatedAt: r.updatedAt.toISOString(),
-          clientName: r.client.name,
-          clientEmail: r.client.email,
-          clientCompany: r.client.companyName,
-          clientPhone: r.client.phone,
-        }));
-      } catch {
-        const store = initLocalStore();
-        let list = [...store.appointments];
-        if (options?.clientId) list = list.filter((a) => a.clientId === options.clientId);
-        if (options?.status && options.status !== "ALL") list = list.filter((a) => a.status === options.status);
-        if (options?.date) list = list.filter((a) => a.appointmentDate === options.date);
-        if (options?.filter === "today") list = list.filter((a) => a.appointmentDate === today);
-        if (options?.filter === "upcoming") list = list.filter((a) => a.appointmentDate >= today && a.status === "CONFIRMED");
-        if (options?.filter === "completed") list = list.filter((a) => a.status === "COMPLETED");
-        if (options?.filter === "cancelled") list = list.filter((a) => a.status === "CANCELLED");
-        if (options?.filter === "noshow") list = list.filter((a) => a.status === "NO_SHOW");
-        list.sort((a, b) => b.appointmentDate.localeCompare(a.appointmentDate) || b.appointmentTime.localeCompare(a.appointmentTime));
-        return list.map((a) => {
-          const client = store.clients.find((c) => c.id === a.clientId);
-          return { ...a, clientName: client?.name || "Unknown", clientEmail: client?.email || "", clientCompany: client?.companyName || "", clientPhone: client?.phone || "" };
-        });
+          const results = await prisma.appointment.findMany({
+            where,
+            orderBy: [{ appointmentDate: "desc" }, { appointmentTime: "desc" }],
+            include: { client: true },
+          });
+          return results.map((r) => ({
+            ...r,
+            createdAt: r.createdAt.toISOString(),
+            updatedAt: r.updatedAt.toISOString(),
+            clientName: r.client?.name || "Unknown",
+            clientEmail: r.client?.email || "",
+            clientCompany: r.client?.companyName || "Direct Inquiry",
+            clientPhone: r.client?.phone || "",
+          }));
+        } catch (dbErr) {
+          markPrismaUnavailable();
+        }
       }
+      const store = initLocalStore();
+      let list = [...store.appointments];
+      if (options?.clientId) list = list.filter((a) => a.clientId === options.clientId);
+      if (options?.status && options.status !== "ALL") list = list.filter((a) => a.status === options.status);
+      if (options?.date) list = list.filter((a) => a.appointmentDate === options.date);
+      if (options?.filter === "today") list = list.filter((a) => a.appointmentDate === today);
+      if (options?.filter === "upcoming") list = list.filter((a) => a.appointmentDate >= today && a.status === "CONFIRMED");
+      if (options?.filter === "completed") list = list.filter((a) => a.status === "COMPLETED");
+      if (options?.filter === "cancelled") list = list.filter((a) => a.status === "CANCELLED");
+      if (options?.filter === "noshow") list = list.filter((a) => a.status === "NO_SHOW");
+      list.sort((a, b) => b.appointmentDate.localeCompare(a.appointmentDate) || b.appointmentTime.localeCompare(a.appointmentTime));
+      return list.map((a) => {
+        const client = store.clients.find((c) => c.id === a.clientId);
+        return { ...a, clientName: client?.name || "Unknown", clientEmail: client?.email || "", clientCompany: client?.companyName || "Direct Inquiry", clientPhone: client?.phone || "" };
+      });
     },
 
     async findById(id: string): Promise<(AppointmentRecord & { clientName: string; clientEmail: string; clientCompany: string; clientPhone: string }) | null> {
-      try {
-        const result = await prisma.appointment.findUnique({ where: { id }, include: { client: true } });
-        if (!result) return null;
-        return {
-          ...result,
-          createdAt: result.createdAt.toISOString(),
-          updatedAt: result.updatedAt.toISOString(),
-          clientName: result.client.name,
-          clientEmail: result.client.email,
-          clientCompany: result.client.companyName,
-          clientPhone: result.client.phone,
-        };
-      } catch {
-        const store = initLocalStore();
-        const appt = store.appointments.find((a) => a.id === id);
-        if (!appt) return null;
-        const client = store.clients.find((c) => c.id === appt.clientId);
-        return { ...appt, clientName: client?.name || "Unknown", clientEmail: client?.email || "", clientCompany: client?.companyName || "", clientPhone: client?.phone || "" };
+      if (isPrismaAvailable()) {
+        try {
+          const result = await prisma.appointment.findUnique({ where: { id }, include: { client: true } });
+          if (result) {
+            return {
+              ...result,
+              createdAt: result.createdAt.toISOString(),
+              updatedAt: result.updatedAt.toISOString(),
+              clientName: result.client?.name || "Unknown",
+              clientEmail: result.client?.email || "",
+              clientCompany: result.client?.companyName || "Direct Inquiry",
+              clientPhone: result.client?.phone || "",
+            };
+          }
+        } catch (dbErr) {
+          markPrismaUnavailable();
+        }
       }
+      const store = initLocalStore();
+      const appt = store.appointments.find((a) => a.id === id);
+      if (!appt) return null;
+      const client = store.clients.find((c) => c.id === appt.clientId);
+      return { ...appt, clientName: client?.name || "Unknown", clientEmail: client?.email || "", clientCompany: client?.companyName || "Direct Inquiry", clientPhone: client?.phone || "" };
     },
 
     async update(id: string, updates: { status?: string; notes?: string; meetingUrl?: string; appointmentDate?: string; appointmentTime?: string }): Promise<AppointmentRecord | null> {
-      try {
-        // If rescheduling date/time, verify availability
-        if (updates.appointmentDate && updates.appointmentTime) {
-          const isAvailable = await this.checkSlotAvailability(updates.appointmentDate, updates.appointmentTime, id);
-          if (!isAvailable) throw new Error("SLOT_TAKEN");
+      if (isPrismaAvailable()) {
+        try {
+          // If rescheduling date/time, verify availability
+          if (updates.appointmentDate && updates.appointmentTime) {
+            const isAvailable = await this.checkSlotAvailability(updates.appointmentDate, updates.appointmentTime, id);
+            if (!isAvailable) throw new Error("SLOT_TAKEN");
+          }
+
+          const result = await prisma.appointment.update({
+            where: { id },
+            data: {
+              ...(updates.status ? { status: updates.status } : {}),
+              ...(updates.notes !== undefined ? { notes: updates.notes } : {}),
+              ...(updates.meetingUrl !== undefined ? { meetingUrl: updates.meetingUrl } : {}),
+              ...(updates.appointmentDate ? { appointmentDate: updates.appointmentDate } : {}),
+              ...(updates.appointmentTime ? { appointmentTime: updates.appointmentTime } : {}),
+            },
+          });
+          return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
+        } catch (err: unknown) {
+          if (err instanceof Error && err.message === "SLOT_TAKEN") throw err;
+          markPrismaUnavailable();
         }
-
-        const result = await prisma.appointment.update({
-          where: { id },
-          data: {
-            ...(updates.status ? { status: updates.status } : {}),
-            ...(updates.notes !== undefined ? { notes: updates.notes } : {}),
-            ...(updates.meetingUrl !== undefined ? { meetingUrl: updates.meetingUrl } : {}),
-            ...(updates.appointmentDate ? { appointmentDate: updates.appointmentDate } : {}),
-            ...(updates.appointmentTime ? { appointmentTime: updates.appointmentTime } : {}),
-          },
-        });
-        return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
-      } catch (err: unknown) {
-        if (err instanceof Error && err.message === "SLOT_TAKEN") throw err;
-        const store = initLocalStore();
-        const idx = store.appointments.findIndex((a) => a.id === id);
-        if (idx === -1) return null;
-
-        if (updates.appointmentDate && updates.appointmentTime) {
-          const conflict = store.appointments.find(
-            (a) => a.id !== id && a.appointmentDate === updates.appointmentDate && a.appointmentTime === updates.appointmentTime && a.status !== "CANCELLED"
-          );
-          if (conflict) throw new Error("SLOT_TAKEN");
-        }
-
-        store.appointments[idx] = { ...store.appointments[idx], ...updates, updatedAt: new Date().toISOString() };
-        saveLocalStore(store);
-        return store.appointments[idx];
       }
+
+      const store = initLocalStore();
+      const idx = store.appointments.findIndex((a) => a.id === id);
+      if (idx === -1) return null;
+
+      if (updates.appointmentDate && updates.appointmentTime) {
+        const conflict = store.appointments.find(
+          (a) => a.id !== id && a.appointmentDate === updates.appointmentDate && a.appointmentTime === updates.appointmentTime && a.status !== "CANCELLED"
+        );
+        if (conflict) throw new Error("SLOT_TAKEN");
+      }
+
+      store.appointments[idx] = { ...store.appointments[idx], ...updates, updatedAt: new Date().toISOString() };
+      saveLocalStore(store);
+      return store.appointments[idx];
+    },
+
+    async delete(id: string): Promise<boolean> {
+      if (isPrismaAvailable()) {
+        try {
+          await prisma.appointment.delete({ where: { id } });
+          return true;
+        } catch (dbErr) {
+          markPrismaUnavailable();
+        }
+      }
+      const store = initLocalStore();
+      const initialLen = store.appointments.length;
+      store.appointments = store.appointments.filter((a) => a.id !== id);
+      if (store.appointments.length !== initialLen) {
+        saveLocalStore(store);
+        return true;
+      }
+      return false;
     },
   },
 

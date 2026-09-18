@@ -2,7 +2,7 @@
 
 import React, { useState, useEffect, useCallback } from "react";
 import Link from "next/link";
-import { CalendarCheck, AlertCircle, ArrowUpRight, CalendarX } from "lucide-react";
+import { CalendarCheck, AlertCircle, ArrowUpRight, CalendarX, Trash2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
 interface AppointmentRow {
@@ -49,20 +49,51 @@ export default function AdminAppointmentsPage() {
 
   const load = useCallback((filter: string) => {
     setLoading(true);
+    setError(null);
     fetch("/api/admin/appointments?filter=" + filter)
-      .then((r) => r.ok ? r.json() : Promise.reject("Failed"))
-      .then((d) => setAppointments(d.appointments || []))
-      .catch(() => setError("Failed to load appointments."))
+      .then(async (r) => {
+        if (r.status === 401) {
+          window.location.href = "/admin/login";
+          return;
+        }
+        const d = await r.json();
+        if (!r.ok) throw new Error(d.error || "Failed to load appointments.");
+        setAppointments(d.appointments || []);
+      })
+      .catch((err) => setError(err instanceof Error ? err.message : "Failed to load appointments."))
       .finally(() => setLoading(false));
   }, []);
 
   useEffect(() => { load(activeFilter); }, [activeFilter, load]);
 
+  const handleDelete = async (id: string, name: string) => {
+    if (!confirm(`Are you sure you want to delete the appointment for ${name}?`)) return;
+    try {
+      const res = await fetch(`/api/admin/appointments/${id}`, { method: "DELETE" });
+      if (!res.ok) {
+        const d = await res.json();
+        throw new Error(d.error || "Failed to delete");
+      }
+      setAppointments((prev) => prev.filter((a) => a.id !== id));
+    } catch (err: unknown) {
+      alert(err instanceof Error ? err.message : "Failed to delete appointment");
+    }
+  };
+
   return (
     <div className="space-y-6">
-      <div>
-        <h2 className="text-xl font-extrabold text-white tracking-tight">Appointments</h2>
-        <p className="text-xs text-gray-400">All strategy calls booked through the public booking page.</p>
+      <div className="flex items-center justify-between">
+        <div>
+          <h2 className="text-xl font-extrabold text-white tracking-tight">Appointments</h2>
+          <p className="text-xs text-gray-400">All strategy calls booked through the public booking page.</p>
+        </div>
+        <button
+          onClick={() => load(activeFilter)}
+          className="px-3.5 py-1.5 rounded-xl bg-white/[0.04] hover:bg-white/[0.08] border border-[#1B2234] text-xs font-bold text-gray-300 hover:text-white transition-colors flex items-center gap-1.5"
+        >
+          <CalendarCheck size={14} className="text-cyan-400" />
+          <span>Refresh</span>
+        </button>
       </div>
 
       {/* Filter tabs */}
@@ -84,14 +115,27 @@ export default function AdminAppointmentsPage() {
       {loading ? (
         <div className="space-y-3">{[...Array(4)].map((_, i) => <div key={i} className="h-16 rounded-2xl bg-white/5 animate-pulse" />)}</div>
       ) : error ? (
-        <div className="p-8 rounded-2xl bg-red-500/10 border border-red-500/30 text-center">
-          <AlertCircle className="w-8 h-8 text-red-400 mx-auto mb-2" /><p className="text-xs text-red-400">{error}</p>
+        <div className="p-8 rounded-2xl bg-red-500/10 border border-red-500/30 text-center space-y-3">
+          <AlertCircle className="w-8 h-8 text-red-400 mx-auto" />
+          <p className="text-xs text-red-400">{error}</p>
+          <button
+            onClick={() => load(activeFilter)}
+            className="px-4 py-2 rounded-xl bg-white/10 hover:bg-white/20 text-xs font-bold text-white transition-colors"
+          >
+            Retry Loading
+          </button>
         </div>
       ) : appointments.length === 0 ? (
         <div className="py-24 rounded-2xl bg-white/[0.02] border border-[#1B2234] text-center">
           <CalendarX className="w-12 h-12 text-gray-700 mx-auto mb-4" />
           <p className="text-sm font-bold text-white mb-1">{activeFilter !== "all" ? "No appointments for this filter." : "No appointments yet."}</p>
-          <p className="text-xs text-gray-500">Appointments appear when customers book via the public booking page.</p>
+          <p className="text-xs text-gray-500 mb-4">Appointments appear when customers book via the public booking page.</p>
+          <button
+            onClick={() => load("all")}
+            className="px-3.5 py-1.5 rounded-xl bg-white/5 hover:bg-white/10 text-xs text-gray-300 hover:text-white transition-colors"
+          >
+            Show All Appointments
+          </button>
         </div>
       ) : (
         <div className="rounded-2xl bg-[#0E121E] border border-[#1B2234] overflow-hidden">
@@ -126,12 +170,21 @@ export default function AdminAppointmentsPage() {
                       </span>
                     </td>
                     <td className="py-4 px-5 text-right">
-                      <Link
-                        href={"/admin/appointments/" + a.id}
-                        className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 font-semibold text-[11px] transition-colors inline-flex items-center gap-1"
-                      >
-                        Detail <ArrowUpRight size={11} />
-                      </Link>
+                      <div className="flex items-center justify-end gap-1.5">
+                        <Link
+                          href={"/admin/appointments/" + a.id}
+                          className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 font-semibold text-[11px] transition-colors inline-flex items-center gap-1"
+                        >
+                          Detail <ArrowUpRight size={11} />
+                        </Link>
+                        <button
+                          onClick={() => handleDelete(a.id, a.clientName)}
+                          className="p-1.5 rounded-lg hover:bg-red-500/20 text-gray-500 hover:text-red-400 transition-colors"
+                          title="Delete appointment"
+                        >
+                          <Trash2 size={13} />
+                        </button>
+                      </div>
                     </td>
                   </tr>
                 ))}

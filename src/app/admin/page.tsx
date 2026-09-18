@@ -17,6 +17,8 @@ interface DashboardStats {
     proposalSent: number;
     won: number;
     lost: number;
+    appointmentsTotal?: number;
+    appointmentsUpcoming?: number;
   };
   byService: Record<string, number>;
   byBudget: Record<string, number>;
@@ -31,6 +33,16 @@ interface DashboardStats {
     status: string;
     createdAt: string;
   }>;
+  recentAppointments?: Array<{
+    id: string;
+    clientName: string;
+    clientEmail: string;
+    callScope?: string;
+    appointmentDate: string;
+    appointmentTime: string;
+    status: string;
+    createdAt: string;
+  }>;
 }
 
 const STATUS_COLOR: Record<string, string> = {
@@ -40,6 +52,10 @@ const STATUS_COLOR: Record<string, string> = {
   PROPOSAL_SENT: "bg-amber-500/15 text-amber-300 border-amber-500/30",
   WON: "bg-emerald-500/15 text-emerald-300 border-emerald-500/30",
   LOST: "bg-rose-500/15 text-rose-300 border-rose-500/30",
+  CONFIRMED: "bg-emerald-500/15 text-emerald-400 border-emerald-500/30",
+  COMPLETED: "bg-blue-500/15 text-blue-400 border-blue-500/30",
+  CANCELLED: "bg-rose-500/15 text-rose-400 border-rose-500/30",
+  RESCHEDULED: "bg-amber-500/15 text-amber-400 border-amber-500/30",
 };
 
 export default function AdminDashboardPage() {
@@ -94,13 +110,13 @@ export default function AdminDashboardPage() {
   }
 
   const kpis = [
-    { label: "Total Leads", value: stats.counts.total, icon: Users, color: "text-white" },
-    { label: "New", value: stats.counts.new, icon: AlertCircle, color: "text-cyan-400" },
-    { label: "Contacted", value: stats.counts.contacted, icon: UserCheck, color: "text-blue-400" },
-    { label: "Meetings", value: stats.counts.meetingScheduled, icon: Calendar, color: "text-purple-400" },
-    { label: "Proposals", value: stats.counts.proposalSent, icon: FileText, color: "text-amber-400" },
-    { label: "Won", value: stats.counts.won, icon: CheckCircle2, color: "text-emerald-400" },
-    { label: "Lost", value: stats.counts.lost, icon: XCircle, color: "text-rose-400" },
+    { label: "Total Leads", value: stats.counts.total, icon: Users, color: "text-white", href: "/admin/leads" },
+    { label: "New Leads", value: stats.counts.new, icon: AlertCircle, color: "text-cyan-400", href: "/admin/leads" },
+    { label: "Contacted", value: stats.counts.contacted, icon: UserCheck, color: "text-blue-400", href: "/admin/leads" },
+    { label: "Booked Calls", value: stats.counts.appointmentsTotal ?? stats.counts.meetingScheduled, icon: Calendar, color: "text-purple-400", href: "/admin/appointments" },
+    { label: "Proposals", value: stats.counts.proposalSent, icon: FileText, color: "text-amber-400", href: "/admin/leads" },
+    { label: "Won", value: stats.counts.won, icon: CheckCircle2, color: "text-emerald-400", href: "/admin/leads" },
+    { label: "Lost", value: stats.counts.lost, icon: XCircle, color: "text-rose-400", href: "/admin/leads" },
   ];
 
   const maxTimeCount = Math.max(...stats.timeSeries.map((t) => t.count), 1);
@@ -140,18 +156,19 @@ export default function AdminDashboardPage() {
       {/* Main KPI Cards Grid */}
       <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-7 gap-3 sm:gap-4">
         {kpis.map((kpi) => (
-          <div
+          <Link
             key={kpi.label}
-            className="p-4 rounded-2xl bg-[#0E121E] border border-[#1B2234] hover:border-gray-700 transition-all flex flex-col justify-between"
+            href={kpi.href}
+            className="p-4 rounded-2xl bg-[#0E121E] border border-[#1B2234] hover:border-cyan-500/40 transition-all flex flex-col justify-between group"
           >
             <div className="flex items-center justify-between mb-2">
-              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider">{kpi.label}</span>
-              <kpi.icon size={15} className={kpi.color} />
+              <span className="text-[11px] font-bold text-gray-400 uppercase tracking-wider group-hover:text-gray-300 transition-colors">{kpi.label}</span>
+              <kpi.icon size={15} className={cn(kpi.color, "transition-transform group-hover:scale-110")} />
             </div>
             <div className={cn("text-2xl sm:text-3xl font-black font-mono tracking-tight", kpi.color)}>
               {kpi.value}
             </div>
-          </div>
+          </Link>
         ))}
       </div>
 
@@ -341,6 +358,79 @@ export default function AdminDashboardPage() {
                         className="px-3 py-1.5 rounded-lg bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 font-semibold text-[11px] transition-colors"
                       >
                         View Lead
+                      </Link>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+
+      {/* Booked Appointments & Strategy Calls Table */}
+      <div className="rounded-2xl bg-[#0E121E] border border-[#1B2234] overflow-hidden">
+        <div className="p-5 border-b border-[#1B2234] flex items-center justify-between">
+          <div>
+            <div className="flex items-center gap-2">
+              <Calendar className="w-4 h-4 text-purple-400" />
+              <h3 className="text-sm font-bold text-white uppercase tracking-wider">Booked Strategy Calls</h3>
+            </div>
+            <p className="text-[11px] text-gray-400">Scheduled 30-min discovery sessions booked via public website.</p>
+          </div>
+          <Link
+            href="/admin/appointments"
+            className="text-xs font-bold text-purple-400 hover:underline flex items-center gap-1"
+          >
+            <span>Manage Appointments ({stats.counts.appointmentsTotal || 0})</span>
+            <ArrowUpRight size={13} />
+          </Link>
+        </div>
+
+        {(!stats.recentAppointments || stats.recentAppointments.length === 0) ? (
+          <div className="py-12 text-center text-xs text-gray-500">
+            No strategy calls scheduled yet. Public bookings will automatically appear here.
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="w-full text-left text-xs">
+              <thead className="bg-white/[0.02] text-gray-400 border-b border-[#1B2234] font-mono uppercase tracking-wider text-[10px]">
+                <tr>
+                  <th className="py-3 px-5">Customer / Contact</th>
+                  <th className="py-3 px-5">Scope</th>
+                  <th className="py-3 px-5">Session Date</th>
+                  <th className="py-3 px-5">Time Slot</th>
+                  <th className="py-3 px-5">Status</th>
+                  <th className="py-3 px-5 text-right">Action</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-[#1B2234]">
+                {stats.recentAppointments.map((appt) => (
+                  <tr key={appt.id} className="hover:bg-white/[0.02] transition-colors">
+                    <td className="py-4 px-5">
+                      <div className="font-bold text-white">{appt.clientName}</div>
+                      <div className="text-[11px] text-gray-400 font-mono">{appt.clientEmail}</div>
+                    </td>
+                    <td className="py-4 px-5 text-gray-300 font-medium">
+                      {appt.callScope || "30-min Discovery Brief"}
+                    </td>
+                    <td className="py-4 px-5 font-mono text-purple-300 font-semibold">
+                      {appt.appointmentDate}
+                    </td>
+                    <td className="py-4 px-5 font-mono text-cyan-300 font-bold">
+                      {appt.appointmentTime} IST
+                    </td>
+                    <td className="py-4 px-5">
+                      <span className={cn("px-2.5 py-1 rounded-full text-[10px] font-bold font-mono border", STATUS_COLOR[appt.status] || "bg-white/10 text-white")}>
+                        {appt.status}
+                      </span>
+                    </td>
+                    <td className="py-4 px-5 text-right">
+                      <Link
+                        href={`/admin/appointments/${appt.id}`}
+                        className="px-3 py-1.5 rounded-lg bg-purple-500/10 hover:bg-purple-500/20 text-purple-300 font-semibold text-[11px] transition-colors"
+                      >
+                        Details
                       </Link>
                     </td>
                   </tr>
