@@ -173,6 +173,8 @@ const DB_FILE = path.join(DATA_DIR, "store.json");
 // Singleton in-memory store so data operations NEVER crash even if disk writes are restricted
 const globalForStore = global as unknown as { __apexpoLocalStore?: LocalDBData };
 
+let prismaDisabledUntil = 0;
+
 export function isPrismaAvailable(): boolean {
   const url = process.env.DATABASE_URL;
   if (!url || !url.startsWith("postgres")) return false;
@@ -180,7 +182,14 @@ export function isPrismaAvailable(): boolean {
   if (isServerless && (url.includes("localhost") || url.includes("127.0.0.1"))) {
     return false;
   }
+  if (Date.now() < prismaDisabledUntil) {
+    return false;
+  }
   return true;
+}
+
+export function markPrismaUnavailable() {
+  prismaDisabledUntil = Date.now() + 60 * 1000;
 }
 
 const DEFAULT_SETTINGS: Record<string, string> = {
@@ -201,10 +210,6 @@ const DEFAULT_SETTINGS: Record<string, string> = {
 };
 
 function initLocalStore(): LocalDBData {
-  if (globalForStore.__apexpoLocalStore) {
-    return globalForStore.__apexpoLocalStore;
-  }
-
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
@@ -238,6 +243,10 @@ function initLocalStore(): LocalDBData {
     }
   } catch {
     // Reinitialize if corrupted
+  }
+
+  if (globalForStore.__apexpoLocalStore) {
+    return globalForStore.__apexpoLocalStore;
   }
 
   const defaultPasswordHash = bcrypt.hashSync(process.env.ADMIN_DEFAULT_PASSWORD || "ApexpoAdmin2027!", 10);
@@ -1184,32 +1193,63 @@ export const db = {
 
     async findByUsernameOrEmail(identifier: string): Promise<UserRecord | null> {
       const clean = identifier.trim().toLowerCase();
-      try {
-        const user = await prisma.user.findFirst({
-          where: {
-            OR: [
-              { username: { equals: clean, mode: "insensitive" } },
-              { email: { equals: clean, mode: "insensitive" } },
-            ],
-          },
-        });
-        if (!user) return null;
-        return {
-          ...user,
-          username: user.username || (user.email ? user.email.split("@")[0] : "admin"),
-          createdAt: user.createdAt.toISOString(),
-          updatedAt: user.updatedAt.toISOString(),
-        };
-      } catch {
-        const store = initLocalStore();
-        return (
-          store.users.find(
-            (u) =>
-              (u.username && u.username.toLowerCase() === clean) ||
-              u.email.toLowerCase() === clean
-          ) || null
-        );
+      if (isPrismaAvailable()) {
+        try {
+          let user = await prisma.user.findFirst({
+            where: {
+              OR: [
+                { username: { equals: clean, mode: "insensitive" } },
+                { email: { equals: clean, mode: "insensitive" } },
+              ],
+            },
+          });
+
+          // Auto-seed default admin if database is brand new with 0 users
+          if (!user) {
+            const count = await prisma.user.count().catch(() => 1);
+            if (count === 0) {
+              const defaultEmail = (process.env.ADMIN_DEFAULT_EMAIL || "admin@apexpo.digital").toLowerCase();
+              const defaultUsername = (process.env.ADMIN_DEFAULT_USERNAME || "admin").toLowerCase();
+              const defaultPassword = process.env.ADMIN_DEFAULT_PASSWORD || "ApexpoAdmin2027!";
+              const passwordHash = bcrypt.hashSync(defaultPassword, 10);
+              const created = await prisma.user.create({
+                data: {
+                  name: "APEXPO Lead Partner",
+                  username: defaultUsername,
+                  email: defaultEmail,
+                  passwordHash,
+                  role: "SUPER_ADMIN",
+                  active: true,
+                },
+              });
+              if (clean === defaultEmail || clean === defaultUsername) {
+                user = created;
+              }
+            }
+          }
+
+          if (user) {
+            return {
+              ...user,
+              username: user.username || (user.email ? user.email.split("@")[0] : "admin"),
+              createdAt: user.createdAt.toISOString(),
+              updatedAt: user.updatedAt.toISOString(),
+            };
+          }
+        } catch (dbErr) {
+          markPrismaUnavailable();
+          console.warn("[Prisma findByUsernameOrEmail fallback]", dbErr);
+        }
       }
+
+      const store = initLocalStore();
+      return (
+        store.users.find(
+          (u) =>
+            (u.username && u.username.toLowerCase() === clean) ||
+            u.email.toLowerCase() === clean
+        ) || null
+      );
     },
 
     async findById(id: string): Promise<UserRecord | null> {
