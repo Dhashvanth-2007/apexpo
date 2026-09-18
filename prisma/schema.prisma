@@ -1,0 +1,167 @@
+// Prisma Schema for APEXPO Platform & CRM
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String   @id @default(cuid())
+  username     String?  @unique
+  email        String   @unique
+  passwordHash String
+  name         String
+  role         String   @default("ADMIN") // SUPER_ADMIN, ADMIN, TEAM_MEMBER
+  active       Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+  assignedLeads Lead[]  @relation("AssignedLeads")
+}
+
+model Lead {
+  id             String         @id @default(cuid())
+  name           String
+  businessName   String
+  email          String
+  phone          String
+  service        String
+  budget         String
+  message        String
+  status         String         @default("NEW") // NEW, CONTACTED, MEETING_SCHEDULED, PROPOSAL_SENT, WON, LOST
+  notes          String?
+  assignedToId   String?
+  assignedTo     User?          @relation("AssignedLeads", fields: [assignedToId], references: [id])
+  activities     LeadActivity[]
+  createdAt      DateTime       @default(now())
+  updatedAt      DateTime       @updatedAt
+
+  @@index([status])
+  @@index([email])
+  @@index([createdAt])
+}
+
+model LeadActivity {
+  id        String   @id @default(cuid())
+  leadId    String
+  lead      Lead     @relation(fields: [leadId], references: [id], onDelete: Cascade)
+  action    String   // LEAD_CREATED, STATUS_CHANGED, NOTE_ADDED, ASSIGNED, UNASSIGNED
+  details   String?
+  userName  String?  @default("APEXPO Partner")
+  createdAt DateTime @default(now())
+
+  @@index([leadId])
+}
+
+model Project {
+  id              String   @id @default(cuid())
+  slug            String   @unique
+  name            String
+  category        String   // Websites, Mobile Apps, Web Apps, E-Commerce, Events, School, AI
+  description     String
+  clientOrConcept String   @default("Concept Project") // Concept Project or Live Demo
+  services        String[] // Array of services delivered
+  technologies    String[] // Array of tech stack items
+  heroImage       String
+  gallery         String[]
+  problem         String?
+  solution        String?
+  features        String[] @default([])
+  results         String?
+  liveUrl         String?
+  published       Boolean  @default(true)
+  order           Int      @default(0)
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([category])
+  @@index([published])
+}
+
+model Service {
+  id            String   @id @default(cuid())
+  slug          String   @unique
+  title         String
+  description   String
+  icon          String
+  features      String[]
+  startingPrice String
+  published     Boolean  @default(true)
+  order         Int      @default(0)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@index([published])
+}
+
+model Testimonial {
+  id        String   @id @default(cuid())
+  name      String
+  business  String
+  role      String
+  review    String
+  image     String?
+  rating    Int      @default(5)
+  metrics   String?  @default("Verified Client")
+  published Boolean  @default(false)
+  createdAt DateTime @default(now())
+}
+
+model Setting {
+  id        String   @id @default(cuid())
+  key       String   @unique
+  value     String
+  updatedAt DateTime @updatedAt
+}
+
+model AnalyticsEvent {
+  id        String   @id @default(cuid())
+  eventType String   // PAGE_VIEW, START_PROJECT_CLICK, BOOK_CALL_CLICK, WHATSAPP_CLICK, PHONE_CLICK, CONTACT_START, CONTACT_SUBMIT, PORTFOLIO_CLICK
+  path      String   @default("/")
+  metadata  String?  // JSON string of optional attributes
+  createdAt DateTime @default(now())
+
+  @@index([eventType])
+  @@index([createdAt])
+}
+
+model Client {
+  id           String        @id @default(cuid())
+  name         String
+  companyName  String        @default("Direct Inquiry")
+  email        String        @unique
+  phone        String
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+  appointments Appointment[]
+
+  @@index([email])
+  @@index([createdAt])
+}
+
+model Appointment {
+  id              String   @id @default(cuid())
+  clientId        String
+  client          Client   @relation(fields: [clientId], references: [id], onDelete: Cascade)
+  leadId          String?  // Link to Lead if created/found
+  callScope       String   // DISCOVERY, ARCHITECTURE, GROWTH_AUDIT
+  duration        Int      // minutes: 30, 45, 60
+  appointmentDate String   // YYYY-MM-DD (stored as string for simplicity)
+  appointmentTime String   // HH:MM (24h, stored as string)
+  timezone        String   @default("Asia/Kolkata")
+  status          String   @default("CONFIRMED") // CONFIRMED, COMPLETED, CANCELLED, NO_SHOW, RESCHEDULED
+  meetingUrl      String?
+  projectDescription String?
+  notes           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@unique([appointmentDate, appointmentTime]) // Prevent double-booking at DB level
+  @@index([clientId])
+  @@index([status])
+  @@index([appointmentDate])
+}
+
