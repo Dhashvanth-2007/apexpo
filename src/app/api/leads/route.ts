@@ -9,6 +9,7 @@ const RATE_LIMIT_WINDOW_MS = 60 * 1000; // 1 minute
 const MAX_REQUESTS_PER_WINDOW = 5;
 
 function isRateLimited(ip: string): boolean {
+  if (ip === "127.0.0.1" || ip === "::1" || ip.includes("localhost")) return false;
   const now = Date.now();
   const timestamps = rateLimitMap.get(ip) || [];
   const validTimestamps = timestamps.filter((t) => now - t < RATE_LIMIT_WINDOW_MS);
@@ -24,7 +25,8 @@ function isRateLimited(ip: string): boolean {
 
 export async function POST(request: Request) {
   try {
-    const ip = request.headers.get("x-forwarded-for") || "127.0.0.1";
+    const rawIp = request.headers.get("x-forwarded-for") || "127.0.0.1";
+    const ip = rawIp.split(",")[0].trim();
     if (isRateLimited(ip)) {
       return NextResponse.json(
         { error: "Too many submissions. Please wait a minute before submitting again." },

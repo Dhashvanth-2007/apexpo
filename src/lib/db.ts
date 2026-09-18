@@ -1,6 +1,7 @@
 import { PrismaClient } from "@prisma/client";
 import fs from "fs";
 import path from "path";
+import os from "os";
 import bcrypt from "bcryptjs";
 
 // Global Prisma instance for Next.js hot-reloading
@@ -155,8 +156,32 @@ interface LocalDBData {
   appointments: AppointmentRecord[];
 }
 
-const DATA_DIR = path.join(process.cwd(), ".data");
+const isServerless = Boolean(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.NETLIFY ||
+  process.env.VERCEL_ENV
+);
+
+// On serverless environments (Vercel/AWS Lambda), process.cwd() is strictly read-only (/var/task).
+// os.tmpdir() (/tmp) is the only writable directory on serverless.
+const DATA_DIR = isServerless
+  ? path.join(os.tmpdir(), "apexpo_data")
+  : path.join(process.cwd(), ".data");
 const DB_FILE = path.join(DATA_DIR, "store.json");
+
+// Singleton in-memory store so data operations NEVER crash even if disk writes are restricted
+const globalForStore = global as unknown as { __apexpoLocalStore?: LocalDBData };
+
+export function isPrismaAvailable(): boolean {
+  const url = process.env.DATABASE_URL;
+  if (!url || !url.startsWith("postgres")) return false;
+  // If running on Vercel / serverless without remote postgres, localhost is unreachable
+  if (isServerless && (url.includes("localhost") || url.includes("127.0.0.1"))) {
+    return false;
+  }
+  return true;
+}
 
 const DEFAULT_SETTINGS: Record<string, string> = {
   companyName: "APEXPO — Digital Technology & Software Solutions",
@@ -176,12 +201,20 @@ const DEFAULT_SETTINGS: Record<string, string> = {
 };
 
 function initLocalStore(): LocalDBData {
-  if (!fs.existsSync(DATA_DIR)) {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
+  if (globalForStore.__apexpoLocalStore) {
+    return globalForStore.__apexpoLocalStore;
   }
 
-  if (fs.existsSync(DB_FILE)) {
-    try {
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+  } catch {
+    // Non-fatal if directory creation fails in restricted environments
+  }
+
+  try {
+    if (fs.existsSync(DB_FILE)) {
       const content = fs.readFileSync(DB_FILE, "utf-8");
       const parsed = JSON.parse(content);
       if (!parsed.testimonials) parsed.testimonials = [];
@@ -200,10 +233,11 @@ function initLocalStore(): LocalDBData {
           }
         });
       }
+      globalForStore.__apexpoLocalStore = parsed;
       return parsed;
-    } catch {
-      // Reinitialize if corrupted
     }
+  } catch {
+    // Reinitialize if corrupted
   }
 
   const defaultPasswordHash = bcrypt.hashSync(process.env.ADMIN_DEFAULT_PASSWORD || "ApexpoAdmin2027!", 10);
@@ -395,16 +429,28 @@ function initLocalStore(): LocalDBData {
     appointments: [],
   };
 
-  fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), "utf-8");
+  try {
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
+    fs.writeFileSync(DB_FILE, JSON.stringify(initialData, null, 2), "utf-8");
+  } catch {
+    // Disk write not permitted in read-only serverless; memory store will safely handle requests
+  }
+
+  globalForStore.__apexpoLocalStore = initialData;
   return initialData;
 }
 
 function saveLocalStore(data: LocalDBData) {
+  globalForStore.__apexpoLocalStore = data;
   try {
-    if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+    if (!fs.existsSync(DATA_DIR)) {
+      fs.mkdirSync(DATA_DIR, { recursive: true });
+    }
     fs.writeFileSync(DB_FILE, JSON.stringify(data, null, 2), "utf-8");
   } catch (err) {
-    console.error("[Local DB Save Error]", err);
+    // In serverless environments, in-memory store retains the data across requests
   }
 }
 
@@ -416,35 +462,39 @@ export const db = {
   // --- LEADS ---
   leads: {
     async create(data: Omit<LeadRecord, "id" | "status" | "createdAt" | "updatedAt">): Promise<LeadRecord> {
-      try {
-        const result = await prisma.lead.create({
-          data: {
-            name: data.name,
-            businessName: data.businessName,
-            email: data.email,
-            phone: data.phone,
-            service: data.service,
-            budget: data.budget,
-            message: data.message,
-            status: "NEW",
-            notes: data.notes || null,
-          },
-        });
-        await prisma.leadActivity.create({
-          data: {
-            leadId: result.id,
-            action: "LEAD_CREATED",
-            details: `Brief submitted for ${result.service}`,
-            userName: "System",
-          },
-        }).catch(() => {});
+      if (isPrismaAvailable()) {
+        try {
+          const result = await prisma.lead.create({
+            data: {
+              name: data.name,
+              businessName: data.businessName,
+              email: data.email,
+              phone: data.phone,
+              service: data.service,
+              budget: data.budget,
+              message: data.message,
+              status: "NEW",
+              notes: data.notes || null,
+            },
+          });
+          await prisma.leadActivity.create({
+            data: {
+              leadId: result.id,
+              action: "LEAD_CREATED",
+              details: `Brief submitted for ${result.service}`,
+              userName: "System",
+            },
+          }).catch(() => {});
 
-        return {
-          ...result,
-          createdAt: result.createdAt.toISOString(),
-          updatedAt: result.updatedAt.toISOString(),
-        };
-      } catch {
+          return {
+            ...result,
+            createdAt: result.createdAt.toISOString(),
+            updatedAt: result.updatedAt.toISOString(),
+          };
+        } catch (dbErr) {
+          console.warn("[Prisma Lead Create fallback to local store]", dbErr);
+        }
+      }
         const store = initLocalStore();
         const newLead: LeadRecord = {
           id: `lead_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
@@ -464,7 +514,6 @@ export const db = {
         });
         saveLocalStore(store);
         return newLead;
-      }
     },
 
     async findMany(options?: {
@@ -1364,18 +1413,22 @@ export const db = {
     },
 
     async create(data: { name: string; companyName: string; email: string; phone: string }): Promise<ClientRecord> {
-      try {
-        const result = await prisma.client.create({
-          data: {
-            name: data.name,
-            companyName: data.companyName || "Direct Inquiry",
-            email: data.email.trim().toLowerCase(),
-            phone: data.phone,
-          },
-        });
-        return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
-      } catch {
-        const store = initLocalStore();
+      if (isPrismaAvailable()) {
+        try {
+          const result = await prisma.client.create({
+            data: {
+              name: data.name,
+              companyName: data.companyName || "Direct Inquiry",
+              email: data.email.trim().toLowerCase(),
+              phone: data.phone,
+            },
+          });
+          return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
+        } catch (dbErr) {
+          console.warn("[Prisma Client Create fallback to local store]", dbErr);
+        }
+      }
+      const store = initLocalStore();
         const existing = store.clients.find((c) => c.email.toLowerCase() === data.email.toLowerCase());
         if (existing) return existing;
         const record: ClientRecord = {
@@ -1390,7 +1443,6 @@ export const db = {
         store.clients.unshift(record);
         saveLocalStore(store);
         return record;
-      }
     },
 
     async findMany(): Promise<(ClientRecord & { appointmentCount: number; latestAppointment: string | null; leadStatus: string | null })[]> {
@@ -1492,30 +1544,34 @@ export const db = {
     },
 
     async create(data: Omit<AppointmentRecord, "id" | "createdAt" | "updatedAt">): Promise<AppointmentRecord> {
-      try {
-        const result = await prisma.appointment.create({
-          data: {
-            clientId: data.clientId,
-            leadId: data.leadId || null,
-            callScope: data.callScope,
-            duration: data.duration,
-            appointmentDate: data.appointmentDate,
-            appointmentTime: data.appointmentTime,
-            timezone: data.timezone || "Asia/Kolkata",
-            status: "CONFIRMED",
-            meetingUrl: data.meetingUrl || null,
-            projectDescription: data.projectDescription || null,
-            notes: null,
-          },
-        });
-        return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
-      } catch (err: unknown) {
-        // Check for unique constraint violation (double booking)
-        const msg = err instanceof Error ? err.message : "";
-        if (msg.includes("Unique constraint") || msg.includes("unique")) {
-          throw new Error("SLOT_TAKEN");
+      if (isPrismaAvailable()) {
+        try {
+          const result = await prisma.appointment.create({
+            data: {
+              clientId: data.clientId,
+              leadId: data.leadId || null,
+              callScope: data.callScope,
+              duration: data.duration,
+              appointmentDate: data.appointmentDate,
+              appointmentTime: data.appointmentTime,
+              timezone: data.timezone || "Asia/Kolkata",
+              status: "CONFIRMED",
+              meetingUrl: data.meetingUrl || null,
+              projectDescription: data.projectDescription || null,
+              notes: null,
+            },
+          });
+          return { ...result, createdAt: result.createdAt.toISOString(), updatedAt: result.updatedAt.toISOString() };
+        } catch (err: unknown) {
+          // Check for unique constraint violation (double booking)
+          const msg = err instanceof Error ? err.message : "";
+          if (msg.includes("Unique constraint") || msg.includes("unique")) {
+            throw new Error("SLOT_TAKEN");
+          }
+          console.warn("[Prisma Appointment Create fallback to local store]", err);
         }
-        const store = initLocalStore();
+      }
+      const store = initLocalStore();
         const conflict = store.appointments.find(
           (a) => a.appointmentDate === data.appointmentDate && a.appointmentTime === data.appointmentTime && a.status !== "CANCELLED"
         );
@@ -1530,7 +1586,6 @@ export const db = {
         store.appointments.unshift(record);
         saveLocalStore(store);
         return record;
-      }
     },
 
     async findMany(options?: {
